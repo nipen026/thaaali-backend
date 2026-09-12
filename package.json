@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "postinstall": "prisma generate",
     "seed": "node scripts/seed.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
