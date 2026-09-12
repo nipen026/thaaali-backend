@@ -1,0 +1,581 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────
+
+enum BusinessType {
+  restaurant
+  hotel
+  both
+}
+
+enum PlanTier {
+  trial
+  starter
+  pro
+  enterprise
+}
+
+enum PlanStatus {
+  active
+  past_due
+  suspended
+  cancelled
+}
+
+enum Role {
+  owner
+  manager // superseded by restaurant_manager/hotel_manager below; kept only so old rows/migrations stay valid
+  restaurant_manager
+  hotel_manager
+  waiter
+  cashier
+  kitchen
+  hotel_desk
+}
+
+enum PlatformRole {
+  super_admin
+  support_agent
+  billing_admin
+}
+
+enum UserStatus {
+  active
+  inactive
+}
+
+enum TableStatus {
+  available
+  occupied
+  reserved
+  bill_requested
+}
+
+enum MenuItemType {
+  veg
+  non_veg
+}
+
+enum SpiceLevel {
+  none
+  mild
+  medium
+  hot
+  extra_hot
+}
+
+enum OrderStatus {
+  pending
+  preparing
+  ready
+  delivered
+  billed
+  cancelled
+}
+
+enum BillStatus {
+  generated
+  paid
+  void
+}
+
+enum PaymentMethod {
+  cash
+  card
+  upi
+  gateway
+}
+
+enum PaymentStatus {
+  pending
+  success
+  failed
+  refunded
+}
+
+enum InventoryTxnType {
+  purchase
+  consumption
+  adjustment
+  wastage
+}
+
+enum EmploymentStatus {
+  active
+  inactive
+}
+
+enum RoomStatus {
+  available
+  occupied
+  dirty
+  inspecting
+}
+
+enum ReservationStatus {
+  confirmed
+  cancelled
+  checked_in
+}
+
+enum ActorType {
+  user
+  platform_admin
+}
+
+// ─── Platform layer (no tenant scoping) ────────────────────────────────
+
+model PlatformAdmin {
+  id           String       @id @default(uuid()) @db.Uuid
+  email        String       @unique
+  passwordHash String       @map("password_hash")
+  name         String
+  role         PlatformRole
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  @@map("platform_admins")
+}
+
+// ─── Tenant ─────────────────────────────────────────────────────────────
+
+model Tenant {
+  id             String       @id @default(uuid()) @db.Uuid
+  slug           String       @unique
+  name           String
+  customDomain   String?      @unique @map("custom_domain")
+  businessType   BusinessType @default(both) @map("business_type")
+  planTier       PlanTier     @default(trial) @map("plan_tier")
+  planStatus     PlanStatus   @default(active) @map("plan_status")
+  planRenewsAt   DateTime?    @map("plan_renews_at")
+  planSeats      Int          @default(5) @map("plan_seats")
+  planFeatures   String[]     @map("plan_features")
+  billingCustomerId String?   @map("billing_customer_id")
+  currency       String       @default("INR")
+  gstRate        Decimal      @default(0.05) @db.Decimal(5, 4) @map("gst_rate")
+  timezone       String       @default("Asia/Kolkata")
+  dataResidency  String       @default("shared") @map("data_residency")
+  dedicatedDbUri String?      @map("dedicated_db_uri")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  deletedAt      DateTime?    @map("deleted_at")
+
+  users              User[]
+  tables             RestaurantTable[]
+  menuCategories     MenuCategory[]
+  menuItems          MenuItem[]
+  orders             Order[]
+  bills              Bill[]
+  payments           Payment[]
+  inventoryItems     InventoryItem[]
+  inventoryTxns      InventoryTransaction[]
+  staffProfiles      StaffProfile[]
+  hotelRooms         HotelRoom[]
+  reservations       Reservation[]
+  stayRecords        StayRecord[]
+  auditLogs          AuditLog[]
+  dailyAggregates    DailyAggregate[]
+  counters           Counter[]
+
+  @@map("tenants")
+}
+
+// ─── Users & staff ──────────────────────────────────────────────────────
+
+model User {
+  id                  String     @id @default(uuid()) @db.Uuid
+  tenantId            String     @map("tenant_id") @db.Uuid
+  tenant              Tenant     @relation(fields: [tenantId], references: [id])
+  email               String
+  passwordHash        String     @map("password_hash")
+  name                String
+  avatar              String?
+  role                Role
+  permissions         String[]
+  status              UserStatus @default(active)
+  refreshTokenVersion Int        @default(0) @map("refresh_token_version")
+  lastLoginAt         DateTime?  @map("last_login_at")
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
+  deletedAt           DateTime?  @map("deleted_at")
+
+  staffProfile   StaffProfile?
+  ordersWaited   Order[]        @relation("OrderWaiter")
+  tablesWaiting  RestaurantTable[] @relation("TableWaiter")
+  refreshTokens  RefreshToken[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, role])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id])
+  tokenHash String   @map("token_hash")
+  family    String
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model StaffProfile {
+  id                String           @id @default(uuid()) @db.Uuid
+  tenantId          String           @map("tenant_id") @db.Uuid
+  tenant            Tenant           @relation(fields: [tenantId], references: [id])
+  userId            String           @unique @map("user_id") @db.Uuid
+  user              User             @relation(fields: [userId], references: [id])
+  shift             String           @default("morning")
+  tablesAssigned    String[]         @map("tables_assigned")
+  phone             String?
+  employmentStatus  EmploymentStatus @default(active) @map("employment_status")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  @@index([tenantId, employmentStatus])
+  @@map("staff_profiles")
+}
+
+// ─── Restaurant floor ───────────────────────────────────────────────────
+
+model RestaurantTable {
+  id               String      @id @default(uuid()) @db.Uuid
+  tenantId         String      @map("tenant_id") @db.Uuid
+  tenant           Tenant      @relation(fields: [tenantId], references: [id])
+  number           Int
+  capacity         Int
+  zone             String
+  status           TableStatus @default(available)
+  currentWaiterId  String?     @map("current_waiter_id") @db.Uuid
+  currentWaiter    User?       @relation("TableWaiter", fields: [currentWaiterId], references: [id])
+  guests           Int         @default(0)
+  seatedAt         DateTime?   @map("seated_at")
+  reservationTime  String?     @map("reservation_time")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  orders Order[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId, status])
+  @@map("tables")
+}
+
+// ─── Menu ───────────────────────────────────────────────────────────────
+
+model MenuCategory {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  name     String
+  icon     String?
+  sort     Int     @default(0)
+
+  items MenuItem[]
+
+  @@index([tenantId, sort])
+  @@map("menu_categories")
+}
+
+model MenuItem {
+  id           String       @id @default(uuid()) @db.Uuid
+  tenantId     String       @map("tenant_id") @db.Uuid
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  categoryId   String       @map("category_id") @db.Uuid
+  category     MenuCategory @relation(fields: [categoryId], references: [id])
+  name         String
+  price        Decimal      @db.Decimal(10, 2)
+  type         MenuItemType
+  spice        SpiceLevel   @default(mild)
+  dietary      String[]
+  available    Boolean      @default(true)
+  calories     Int?
+  description  String?
+  image        String?
+  ordersCount  Int          @default(0) @map("orders_count")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  orderItems OrderItem[]
+
+  @@index([tenantId, categoryId])
+  @@index([tenantId, available])
+  @@map("menu_items")
+}
+
+// ─── Orders ─────────────────────────────────────────────────────────────
+
+model Order {
+  id        String      @id @default(uuid()) @db.Uuid
+  tenantId  String      @map("tenant_id") @db.Uuid
+  tenant    Tenant      @relation(fields: [tenantId], references: [id])
+  tableId   String?     @map("table_id") @db.Uuid
+  table     RestaurantTable? @relation(fields: [tableId], references: [id])
+  channel   String
+  status    OrderStatus @default(pending)
+  waiterId  String?     @map("waiter_id") @db.Uuid
+  waiter    User?       @relation("OrderWaiter", fields: [waiterId], references: [id])
+  total     Decimal     @db.Decimal(10, 2)
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  items      OrderItem[]
+  billOrders BillOrder[]
+  inventoryTxns InventoryTransaction[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, tableId])
+  @@index([tenantId, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id            String   @id @default(uuid()) @db.Uuid
+  orderId       String   @map("order_id") @db.Uuid
+  order         Order    @relation(fields: [orderId], references: [id])
+  menuItemId    String   @map("menu_item_id") @db.Uuid
+  menuItem      MenuItem @relation(fields: [menuItemId], references: [id])
+  nameSnapshot  String   @map("name_snapshot")
+  priceSnapshot Decimal  @db.Decimal(10, 2) @map("price_snapshot")
+  qty           Int
+  spice         String?
+  notes         String?
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+// ─── Billing & payments ─────────────────────────────────────────────────
+
+model Bill {
+  id            String     @id @default(uuid()) @db.Uuid
+  tenantId      String     @map("tenant_id") @db.Uuid
+  tenant        Tenant     @relation(fields: [tenantId], references: [id])
+  billNumber    Int        @map("bill_number")
+  tableId       String?    @map("table_id") @db.Uuid
+  subtotal      Decimal    @db.Decimal(10, 2)
+  discount      Decimal    @default(0) @db.Decimal(10, 2)
+  cgst          Decimal    @db.Decimal(10, 2)
+  sgst          Decimal    @db.Decimal(10, 2)
+  totalGst      Decimal    @db.Decimal(10, 2) @map("total_gst")
+  grandTotal    Decimal    @db.Decimal(10, 2) @map("grand_total")
+  paymentMethod String?    @map("payment_method")
+  status        BillStatus @default(generated)
+  paidAt        DateTime?  @map("paid_at")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  items      BillItem[]
+  billOrders BillOrder[]
+  payments   Payment[]
+
+  @@unique([tenantId, billNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@map("bills")
+}
+
+// Snapshot rows, deliberately not a join back to order_items — a bill must stay immutable
+// even if the orders it was generated from are later modified.
+model BillItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  billId        String  @map("bill_id") @db.Uuid
+  bill          Bill    @relation(fields: [billId], references: [id])
+  menuItemId    String? @map("menu_item_id") @db.Uuid
+  nameSnapshot  String  @map("name_snapshot")
+  priceSnapshot Decimal @db.Decimal(10, 2) @map("price_snapshot")
+  qty           Int
+
+  @@index([billId])
+  @@map("bill_items")
+}
+
+// Join table tracking which orders were folded into a bill, for traceability/audit.
+model BillOrder {
+  billId  String @map("bill_id") @db.Uuid
+  bill    Bill   @relation(fields: [billId], references: [id])
+  orderId String @map("order_id") @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id])
+
+  @@id([billId, orderId])
+  @@map("bill_orders")
+}
+
+model Payment {
+  id         String        @id @default(uuid()) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
+  tenant     Tenant        @relation(fields: [tenantId], references: [id])
+  billId     String        @map("bill_id") @db.Uuid
+  bill       Bill          @relation(fields: [billId], references: [id])
+  method     PaymentMethod
+  gatewayRef String?       @map("gateway_ref")
+  amount     Decimal       @db.Decimal(10, 2)
+  status     PaymentStatus @default(pending)
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+
+  @@index([tenantId, billId])
+  @@index([gatewayRef])
+  @@map("payments")
+}
+
+// ─── Inventory ──────────────────────────────────────────────────────────
+
+model InventoryItem {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  name          String
+  unit          String
+  currentStock  Decimal  @default(0) @db.Decimal(10, 3) @map("current_stock")
+  reorderAt     Decimal  @db.Decimal(10, 3) @map("reorder_at")
+  pricePerUnit  Decimal  @db.Decimal(10, 2) @map("price_per_unit")
+  supplier      String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  transactions InventoryTransaction[]
+
+  @@index([tenantId, currentStock])
+  @@map("inventory_items")
+}
+
+model InventoryTransaction {
+  id              String            @id @default(uuid()) @db.Uuid
+  tenantId        String            @map("tenant_id") @db.Uuid
+  tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  itemId          String            @map("item_id") @db.Uuid
+  item            InventoryItem     @relation(fields: [itemId], references: [id])
+  type            InventoryTxnType
+  qtyDelta        Decimal           @db.Decimal(10, 3) @map("qty_delta")
+  resultingStock  Decimal           @db.Decimal(10, 3) @map("resulting_stock")
+  reason          String?
+  orderId         String?           @map("order_id") @db.Uuid
+  order           Order?            @relation(fields: [orderId], references: [id])
+  actorUserId     String?           @map("actor_user_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
+
+  @@index([tenantId, itemId, createdAt])
+  @@map("inventory_transactions")
+}
+
+// ─── Hotel ──────────────────────────────────────────────────────────────
+
+model HotelRoom {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  number    String
+  type      String
+  floor     Int
+  status    RoomStatus @default(available)
+  rate      Decimal    @db.Decimal(10, 2)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  stayRecords StayRecord[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId, status])
+  @@map("hotel_rooms")
+}
+
+model Reservation {
+  id        String             @id @default(uuid()) @db.Uuid
+  tenantId  String             @map("tenant_id") @db.Uuid
+  tenant    Tenant             @relation(fields: [tenantId], references: [id])
+  guestName String             @map("guest_name")
+  phone     String?
+  roomType  String             @map("room_type")
+  checkIn   DateTime           @map("check_in")
+  checkOut  DateTime           @map("check_out")
+  guests    Int                @default(1)
+  status    ReservationStatus  @default(confirmed)
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  stayRecords StayRecord[]
+
+  @@index([tenantId, checkIn])
+  @@map("reservations")
+}
+
+model StayRecord {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @map("tenant_id") @db.Uuid
+  tenant        Tenant       @relation(fields: [tenantId], references: [id])
+  roomId        String       @map("room_id") @db.Uuid
+  room          HotelRoom    @relation(fields: [roomId], references: [id])
+  reservationId String?      @map("reservation_id") @db.Uuid
+  reservation   Reservation? @relation(fields: [reservationId], references: [id])
+  guestName     String       @map("guest_name")
+  phone         String?
+  checkInAt     DateTime     @map("check_in_at")
+  checkOutAt    DateTime?    @map("check_out_at")
+  rateCharged   Decimal      @db.Decimal(10, 2) @map("rate_charged")
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  @@index([tenantId, roomId, checkInAt])
+  @@index([tenantId, checkOutAt])
+  @@map("stay_records")
+}
+
+// ─── Audit & reporting ──────────────────────────────────────────────────
+
+model AuditLog {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String?   @map("tenant_id") @db.Uuid
+  tenant         Tenant?   @relation(fields: [tenantId], references: [id])
+  actorUserId    String?   @map("actor_user_id") @db.Uuid
+  actorType      ActorType @map("actor_type")
+  impersonatedBy String?   @map("impersonated_by") @db.Uuid
+  action         String
+  targetType     String    @map("target_type")
+  targetId       String?   @map("target_id") @db.Uuid
+  before         Json?
+  after          Json?
+  ip             String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("audit_logs")
+}
+
+model DailyAggregate {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  date          String
+  revenue       Decimal  @default(0) @db.Decimal(12, 2)
+  ordersCount   Int      @default(0) @map("orders_count")
+  avgOrderValue Decimal  @default(0) @db.Decimal(10, 2) @map("avg_order_value")
+  covers        Int      @default(0)
+  channelSplit  Json     @default("{}") @map("channel_split")
+  hourlyBuckets Int[]    @map("hourly_buckets")
+  topItems      Json     @default("[]") @map("top_items")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, date])
+  @@map("daily_aggregates")
+}
+
+// Per-tenant atomic sequences (e.g. id = "bill:<tenantId>") for gapless-enough numbering.
+model Counter {
+  id       String @id
+  tenantId String @map("tenant_id") @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  seq      Int    @default(0)
+
+  @@map("counters")
+}
