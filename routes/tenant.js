@@ -18,12 +18,15 @@ router.put('/', async (req, res, next) => {
       return res.status(403).json({ error: 'Only the owner can edit business settings' });
     }
     const data = {};
-    const { name, business_type, currency, gst_rate, timezone } = req.body;
+    const { name, business_type, currency, gst_rate, timezone, address, phone, gstin } = req.body;
     if (name !== undefined) data.name = name;
     if (business_type !== undefined) data.businessType = business_type;
     if (currency !== undefined) data.currency = currency;
     if (gst_rate !== undefined) data.gstRate = gst_rate;
     if (timezone !== undefined) data.timezone = timezone;
+    if (address !== undefined) data.address = address;
+    if (phone !== undefined) data.phone = phone;
+    if (gstin !== undefined) data.gstin = gstin;
 
     const tenant = await prisma.tenant.update({ where: { id: req.tenantId }, data });
     res.json(serializeTenant(tenant));

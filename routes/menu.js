@@ -36,10 +36,11 @@ router.post('/categories', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const data = {};
-    const { category, name, price, type, spice, dietary, available, calories, description, image } = req.body;
+    const { category, name, price, pricing_unit, type, spice, dietary, available, calories, description, image } = req.body;
     if (category !== undefined) data.categoryId = category;
     if (name !== undefined) data.name = name;
     if (price !== undefined) data.price = price;
+    if (pricing_unit !== undefined) data.pricingUnit = pricing_unit;
     if (type !== undefined) data.type = type;
     if (spice !== undefined) data.spice = spice;
     if (dietary !== undefined) data.dietary = dietary;
@@ -60,12 +61,13 @@ router.put('/:id', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    const { category, name, price, type, spice, dietary, available, calories, description, image } = req.body;
+    const { category, name, price, pricing_unit, type, spice, dietary, available, calories, description, image } = req.body;
     const item = await prisma.menuItem.create({
       data: {
         tenantId: req.tenantId,
         categoryId: category,
         name, price, type,
+        pricingUnit: pricing_unit || 'item',
         spice: spice || 'mild',
         dietary: dietary || [],
         available: available !== undefined ? available : true,

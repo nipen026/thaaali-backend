@@ -29,7 +29,7 @@ router.get('/active', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    const { table_id, channel, waiter_id, items } = req.body;
+    const { table_id, channel, waiter_id, items, customer_name, customer_phone } = req.body;
     const total = items.reduce((s, i) => s + i.price * i.qty, 0);
 
     const order = await prisma.order.create({
@@ -39,12 +39,15 @@ router.post('/', async (req, res, next) => {
         channel,
         waiterId: waiter_id || null,
         total,
+        customerName: customer_name || null,
+        customerPhone: customer_phone || null,
         items: {
           create: items.map((i) => ({
             menuItemId: i.menu_id,
             nameSnapshot: i.name,
             priceSnapshot: i.price,
             qty: i.qty,
+            unit: i.unit || 'item',
             spice: i.spice,
             notes: i.notes,
           })),
@@ -52,6 +55,16 @@ router.post('/', async (req, res, next) => {
       },
       include: withItems,
     });
+
+    // Builds a deduplicated contact list over time (see prisma schema's Customer model) —
+    // name is "latest wins" since a returning customer's name shouldn't drift across old visits.
+    if (customer_phone) {
+      await prisma.customer.upsert({
+        where: { tenantId_phone: { tenantId: req.tenantId, phone: customer_phone } },
+        create: { tenantId: req.tenantId, name: customer_name || 'Guest', phone: customer_phone, ordersCount: 1, lastOrderAt: new Date() },
+        update: { name: customer_name || undefined, ordersCount: { increment: 1 }, lastOrderAt: new Date() },
+      });
+    }
 
     const out = serializeOrder(order);
     req.io.emit('new_order', out);
@@ -118,6 +131,7 @@ router.post('/:id/add-items', async (req, res, next) => {
             nameSnapshot: i.name,
             priceSnapshot: i.price,
             qty: i.qty,
+            unit: i.unit || 'item',
             spice: i.spice,
             notes: i.notes,
           })),
@@ -169,6 +183,7 @@ router.put('/:id/items', async (req, res, next) => {
               nameSnapshot: i.name,
               priceSnapshot: i.price,
               qty: i.qty,
+              unit: i.unit || 'item',
               spice: i.spice,
               notes: i.notes,
             })),

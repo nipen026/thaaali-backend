@@ -5,6 +5,7 @@
 const num = (d) => (d === null || d === undefined ? d : Number(d));
 const ts = (d) => (d ? new Date(d).getTime() : null);
 const dateOnly = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+const round2 = (n) => Math.round(n * 100) / 100;
 
 function serializeTable(t) {
   return {
@@ -30,6 +31,7 @@ function serializeMenuItem(m) {
     name: m.name,
     category: m.categoryId,
     price: num(m.price),
+    pricing_unit: m.pricingUnit,
     type: m.type,
     spice: m.spice,
     dietary: m.dietary,
@@ -54,12 +56,15 @@ function serializeOrder(o) {
       name: i.nameSnapshot,
       price: num(i.priceSnapshot),
       qty: i.qty,
+      unit: i.unit,
       spice: i.spice,
       notes: i.notes,
     })),
     created_at: ts(o.createdAt),
     waiter_id: o.waiterId,
     total: num(o.total),
+    customer_name: o.customerName,
+    customer_phone: o.customerPhone,
   };
 }
 
@@ -77,6 +82,8 @@ function serializeBill(b) {
     grand_total: num(b.grandTotal),
     payment_method: b.paymentMethod,
     status: b.status,
+    customer_name: b.customerName,
+    customer_phone: b.customerPhone,
     created_at: ts(b.createdAt),
     paid_at: ts(b.paidAt),
     items: (b.items || []).map((i) => ({
@@ -84,6 +91,7 @@ function serializeBill(b) {
       name: i.nameSnapshot,
       price: num(i.priceSnapshot),
       qty: i.qty,
+      unit: i.unit,
     })),
   };
 }
@@ -109,6 +117,41 @@ function serializeStaff(profile) {
     status: profile.employmentStatus,
     tables_assigned: profile.tablesAssigned,
     phone: profile.phone,
+    required_hours_per_day: num(profile.requiredHoursPerDay),
+  };
+}
+
+// Working hours = gross clocked time minus break time; an open (still-clocked-in) record or
+// break counts up to "now" so live in-progress totals make sense, not just closed-out ones.
+function computeAttendanceHours(record) {
+  const end = record.checkOutAt ? new Date(record.checkOutAt) : new Date();
+  const breakMs = (record.breaks || []).reduce((s, b) => {
+    const bEnd = b.endAt ? new Date(b.endAt) : new Date();
+    return s + (bEnd - new Date(b.startAt));
+  }, 0);
+  const grossMs = end - new Date(record.checkInAt);
+  const workingMs = Math.max(0, grossMs - breakMs);
+  return { workingHours: workingMs / 3600000, breakHours: breakMs / 3600000 };
+}
+
+function serializeAttendanceRecord(r) {
+  const { workingHours, breakHours } = computeAttendanceHours(r);
+  const requiredHours = num(r.staffProfile.requiredHoursPerDay);
+  return {
+    id: r.id,
+    staff_id: r.staffProfile.userId,
+    name: r.staffProfile.user.name,
+    role: r.staffProfile.user.role,
+    date: r.date,
+    status: r.status,
+    check_in: ts(r.checkInAt),
+    check_out: ts(r.checkOutAt),
+    working_hours: round2(workingHours),
+    break_hours: round2(breakHours),
+    required_hours: requiredHours,
+    variance_hours: round2(workingHours - requiredHours),
+    marked_by_manager: !!r.markedBy,
+    breaks: (r.breaks || []).map((b) => ({ start: ts(b.startAt), end: ts(b.endAt) })),
   };
 }
 
@@ -153,12 +196,26 @@ function serializeTenant(t) {
     currency: t.currency,
     gst_rate: num(t.gstRate),
     timezone: t.timezone,
+    address: t.address,
+    phone: t.phone,
+    gstin: t.gstin,
+  };
+}
+
+function serializeCustomer(c) {
+  return {
+    id: c.id,
+    name: c.name,
+    phone: c.phone,
+    orders_count: c.ordersCount,
+    total_spend: num(c.totalSpend),
+    last_order_at: ts(c.lastOrderAt),
   };
 }
 
 module.exports = {
-  num, ts, dateOnly,
+  num, ts, dateOnly, round2,
   serializeTable, serializeMenuCategory, serializeMenuItem, serializeOrder, serializeBill,
   serializeInventoryItem, serializeStaff, serializeHotelRoom, serializeReservation, serializeUser,
-  serializeTenant,
+  serializeTenant, computeAttendanceHours, serializeAttendanceRecord, serializeCustomer,
 };

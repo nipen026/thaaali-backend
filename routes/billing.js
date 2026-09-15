@@ -31,6 +31,16 @@ async function incrementTodayRevenue(tenantId, amount) {
   });
 }
 
+// Ties realized revenue (not just cart totals) to the Customer record built up in
+// routes/orders.js — a no-op if the phone was never captured or the customer row is missing.
+async function incrementCustomerSpend(tenantId, phone, amount) {
+  if (!phone) return;
+  await prisma.customer.updateMany({
+    where: { tenantId, phone },
+    data: { totalSpend: { increment: amount } },
+  });
+}
+
 router.post('/generate', async (req, res, next) => {
   try {
     const { table_id, order_ids, discount = 0, payment_method } = req.body;
@@ -45,6 +55,8 @@ router.post('/generate', async (req, res, next) => {
     const gst = calculateGST(subtotal);
     const grandTotal = subtotal + gst.total_gst;
     const billNumber = await nextBillNumber(req.tenantId);
+    // One dining party generally shares one customer — take the first order that captured one.
+    const withCustomer = orders.find((o) => o.customerPhone) || orders[0];
 
     const bill = await prisma.bill.create({
       data: {
@@ -54,11 +66,13 @@ router.post('/generate', async (req, res, next) => {
         subtotal, discount, cgst: gst.cgst, sgst: gst.sgst, totalGst: gst.total_gst, grandTotal,
         paymentMethod: payment_method || null,
         status: payment_method ? 'paid' : 'generated',
+        customerName: withCustomer.customerName || null,
+        customerPhone: withCustomer.customerPhone || null,
         paidAt: payment_method ? new Date() : null,
         billOrders: { create: orders.map((o) => ({ orderId: o.id })) },
         items: {
           create: orders.flatMap((o) => o.items.map((i) => ({
-            menuItemId: i.menuItemId, nameSnapshot: i.nameSnapshot, priceSnapshot: i.priceSnapshot, qty: i.qty,
+            menuItemId: i.menuItemId, nameSnapshot: i.nameSnapshot, priceSnapshot: i.priceSnapshot, qty: i.qty, unit: i.unit,
           }))),
         },
       },
@@ -75,6 +89,7 @@ router.post('/generate', async (req, res, next) => {
         req.io.emit('table_updated', serializeTable(t));
       }
       await incrementTodayRevenue(req.tenantId, grandTotal);
+      await incrementCustomerSpend(req.tenantId, bill.customerPhone, grandTotal);
     }
 
     const out = serializeBill(bill);
@@ -107,6 +122,7 @@ router.put('/:id/pay', async (req, res, next) => {
       req.io.emit('table_updated', serializeTable(t));
     }
     await incrementTodayRevenue(req.tenantId, Number(bill.grandTotal));
+    await incrementCustomerSpend(req.tenantId, bill.customerPhone, Number(bill.grandTotal));
 
     const out = serializeBill(bill);
     req.io.emit('bill_paid', out);

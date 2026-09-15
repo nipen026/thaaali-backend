@@ -27,7 +27,7 @@ router.get('/', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     if (!canManageStaff(req, res)) return;
-    const { name, email, password, role, phone, shift } = req.body;
+    const { name, email, password, role, phone, shift, required_hours_per_day } = req.body;
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: 'name, email, password and role are required' });
     }
@@ -48,6 +48,7 @@ router.post('/', async (req, res, next) => {
         data: {
           tenantId: req.tenantId, userId: user.id,
           shift: shift || 'morning', phone: phone || null, tablesAssigned: [],
+          ...(required_hours_per_day !== undefined ? { requiredHoursPerDay: required_hours_per_day } : {}),
         },
         include: { user: true },
       });
@@ -60,7 +61,7 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     if (!canManageStaff(req, res)) return;
-    const { name, role, phone, shift } = req.body;
+    const { name, role, phone, shift, required_hours_per_day } = req.body;
     if (role && !ASSIGNABLE_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
 
     const userData = {};
@@ -69,6 +70,7 @@ router.put('/:id', async (req, res, next) => {
     const profileData = {};
     if (phone !== undefined) profileData.phone = phone;
     if (shift !== undefined) profileData.shift = shift;
+    if (required_hours_per_day !== undefined) profileData.requiredHoursPerDay = required_hours_per_day;
 
     const [, profile] = await prisma.$transaction([
       prisma.user.update({ where: { id: req.params.id }, data: userData }),
