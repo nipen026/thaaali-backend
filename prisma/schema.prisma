@@ -62,6 +62,11 @@ enum MenuItemType {
   non_veg
 }
 
+enum PricingUnit {
+  item
+  gram
+}
+
 enum SpiceLevel {
   none
   mild
@@ -160,6 +165,9 @@ model Tenant {
   currency       String       @default("INR")
   gstRate        Decimal      @default(0.05) @db.Decimal(5, 4) @map("gst_rate")
   timezone       String       @default("Asia/Kolkata")
+  address        String?
+  phone          String?
+  gstin          String?
   dataResidency  String       @default("shared") @map("data_residency")
   dedicatedDbUri String?      @map("dedicated_db_uri")
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -182,6 +190,8 @@ model Tenant {
   auditLogs          AuditLog[]
   dailyAggregates    DailyAggregate[]
   counters           Counter[]
+  attendanceRecords  AttendanceRecord[]
+  customers          Customer[]
 
   @@map("tenants")
 }
@@ -200,19 +210,37 @@ model User {
   permissions         String[]
   status              UserStatus @default(active)
   refreshTokenVersion Int        @default(0) @map("refresh_token_version")
+  emailVerifiedAt     DateTime?  @map("email_verified_at")
   lastLoginAt         DateTime?  @map("last_login_at")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
   deletedAt           DateTime?  @map("deleted_at")
 
-  staffProfile   StaffProfile?
-  ordersWaited   Order[]        @relation("OrderWaiter")
-  tablesWaiting  RestaurantTable[] @relation("TableWaiter")
-  refreshTokens  RefreshToken[]
+  staffProfile            StaffProfile?
+  ordersWaited            Order[]                  @relation("OrderWaiter")
+  tablesWaiting           RestaurantTable[]        @relation("TableWaiter")
+  refreshTokens           RefreshToken[]
+  emailVerificationTokens EmailVerificationToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId, role])
   @@map("users")
+}
+
+// One row per verification email sent — a fresh row (rather than overwriting) so a
+// resend doesn't invalidate a link already in flight, e.g. across two tabs/devices.
+model EmailVerificationToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  user       User      @relation(fields: [userId], references: [id])
+  tokenHash  String    @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("email_verification_tokens")
 }
 
 model RefreshToken {
@@ -230,20 +258,66 @@ model RefreshToken {
 }
 
 model StaffProfile {
-  id                String           @id @default(uuid()) @db.Uuid
-  tenantId          String           @map("tenant_id") @db.Uuid
-  tenant            Tenant           @relation(fields: [tenantId], references: [id])
-  userId            String           @unique @map("user_id") @db.Uuid
-  user              User             @relation(fields: [userId], references: [id])
-  shift             String           @default("morning")
-  tablesAssigned    String[]         @map("tables_assigned")
-  phone             String?
-  employmentStatus  EmploymentStatus @default(active) @map("employment_status")
-  createdAt         DateTime         @default(now()) @map("created_at")
-  updatedAt         DateTime         @updatedAt @map("updated_at")
+  id                  String           @id @default(uuid()) @db.Uuid
+  tenantId            String           @map("tenant_id") @db.Uuid
+  tenant              Tenant           @relation(fields: [tenantId], references: [id])
+  userId              String           @unique @map("user_id") @db.Uuid
+  user                User             @relation(fields: [userId], references: [id])
+  shift               String           @default("morning")
+  tablesAssigned      String[]         @map("tables_assigned")
+  phone               String?
+  employmentStatus    EmploymentStatus @default(active) @map("employment_status")
+  requiredHoursPerDay Decimal          @default(8) @db.Decimal(4, 2) @map("required_hours_per_day")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  attendanceRecords AttendanceRecord[]
 
   @@index([tenantId, employmentStatus])
   @@map("staff_profiles")
+}
+
+// ─── Attendance ─────────────────────────────────────────────────────────
+
+enum AttendanceStatus {
+  checked_in
+  on_break
+  checked_out
+}
+
+// One record per staff member per calendar day — checking out closes the day's record for
+// good (re-checking in the same day is rejected); mid-day pauses use AttendanceBreak instead
+// of a second check-in, which keeps the hours math unambiguous.
+model AttendanceRecord {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @map("tenant_id") @db.Uuid
+  tenant         Tenant           @relation(fields: [tenantId], references: [id])
+  staffProfileId String           @map("staff_profile_id") @db.Uuid
+  staffProfile   StaffProfile     @relation(fields: [staffProfileId], references: [id])
+  date           String           // YYYY-MM-DD, same UTC-date convention billing.js already uses
+  status         AttendanceStatus @default(checked_in)
+  checkInAt      DateTime         @map("check_in_at")
+  checkOutAt     DateTime?        @map("check_out_at")
+  markedBy       String?          @map("marked_by") @db.Uuid // manager's userId, null = self-service
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  breaks AttendanceBreak[]
+
+  @@unique([staffProfileId, date])
+  @@index([tenantId, date])
+  @@map("attendance_records")
+}
+
+model AttendanceBreak {
+  id                 String           @id @default(uuid()) @db.Uuid
+  attendanceRecordId String           @map("attendance_record_id") @db.Uuid
+  attendanceRecord   AttendanceRecord @relation(fields: [attendanceRecordId], references: [id])
+  startAt            DateTime         @map("start_at")
+  endAt              DateTime?        @map("end_at")
+
+  @@index([attendanceRecordId])
+  @@map("attendance_breaks")
 }
 
 // ─── Restaurant floor ───────────────────────────────────────────────────
@@ -295,6 +369,7 @@ model MenuItem {
   category     MenuCategory @relation(fields: [categoryId], references: [id])
   name         String
   price        Decimal      @db.Decimal(10, 2)
+  pricingUnit  PricingUnit  @default(item) @map("pricing_unit") // `price` means "per gram" when this is `gram`
   type         MenuItemType
   spice        SpiceLevel   @default(mild)
   dietary      String[]
@@ -326,6 +401,8 @@ model Order {
   waiterId  String?     @map("waiter_id") @db.Uuid
   waiter    User?       @relation("OrderWaiter", fields: [waiterId], references: [id])
   total     Decimal     @db.Decimal(10, 2)
+  customerName  String? @map("customer_name")
+  customerPhone String? @map("customer_phone")
   createdAt DateTime    @default(now()) @map("created_at")
   updatedAt DateTime    @updatedAt @map("updated_at")
 
@@ -348,6 +425,7 @@ model OrderItem {
   nameSnapshot  String   @map("name_snapshot")
   priceSnapshot Decimal  @db.Decimal(10, 2) @map("price_snapshot")
   qty           Int
+  unit          String   @default("item") // "item" | "gram" — snapshotted from MenuItem.pricingUnit at order time
   spice         String?
   notes         String?
 
@@ -371,6 +449,8 @@ model Bill {
   grandTotal    Decimal    @db.Decimal(10, 2) @map("grand_total")
   paymentMethod String?    @map("payment_method")
   status        BillStatus @default(generated)
+  customerName  String?    @map("customer_name")
+  customerPhone String?    @map("customer_phone")
   paidAt        DateTime?  @map("paid_at")
   createdAt     DateTime   @default(now()) @map("created_at")
   updatedAt     DateTime   @updatedAt @map("updated_at")
@@ -395,6 +475,7 @@ model BillItem {
   nameSnapshot  String  @map("name_snapshot")
   priceSnapshot Decimal @db.Decimal(10, 2) @map("price_snapshot")
   qty           Int
+  unit          String  @default("item")
 
   @@index([billId])
   @@map("bill_items")
@@ -578,4 +659,26 @@ model Counter {
   seq      Int    @default(0)
 
   @@map("counters")
+}
+
+// ─── Customers ──────────────────────────────────────────────────────────
+// A deduplicated contact built up from order-time name/phone capture (see routes/orders.js
+// and routes/billing.js) — the foundation for a future WhatsApp marketing list, not itself a
+// marketing feature. Orders/Bills keep their own denormalized customerName/customerPhone
+// snapshots independent of this record, so editing a customer's saved name never rewrites history.
+model Customer {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  name        String
+  phone       String
+  ordersCount Int       @default(0) @map("orders_count")
+  totalSpend  Decimal   @default(0) @db.Decimal(12, 2) @map("total_spend")
+  lastOrderAt DateTime? @map("last_order_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@unique([tenantId, phone])
+  @@index([tenantId, phone])
+  @@map("customers")
 }

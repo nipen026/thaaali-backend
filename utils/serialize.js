@@ -184,7 +184,7 @@ function serializeReservation(r) {
 }
 
 function serializeUser(u) {
-  return { id: u.id, name: u.name, role: u.role, avatar: u.avatar, email: u.email };
+  return { id: u.id, name: u.name, role: u.role, avatar: u.avatar, email: u.email, emailVerified: !!u.emailVerifiedAt };
 }
 
 function serializeTenant(t) {
