@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { prisma } = require('../config/prisma');
 const { serializeOrder, serializeTable } = require('../utils/serialize');
+const { logEvent } = require('../utils/events');
 
 const withItems = { items: true, table: true };
 
@@ -68,6 +69,7 @@ router.post('/', async (req, res, next) => {
 
     const out = serializeOrder(order);
     req.io.emit('new_order', out);
+    logEvent({ tenantId: req.tenantId, userId: req.user?.id, name: 'order_created', metadata: { channel } });
 
     if (table_id) {
       const t = await prisma.restaurantTable.findUnique({ where: { id: table_id } });

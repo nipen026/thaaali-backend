@@ -7,6 +7,7 @@
     "start": "node server.js",
     "postinstall": "prisma generate",
     "seed": "node scripts/seed.js",
+    "seed:platform": "node scripts/seedPlatform.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "test": "echo \"Error: no test specified\" && exit 1"

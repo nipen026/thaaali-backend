@@ -3,6 +3,7 @@ const { Resend } = require('resend');
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const FROM = process.env.EMAIL_FROM || 'THAAALI <onboarding@resend.dev>';
 const APP_URL = process.env.APP_URL || 'http://localhost:5173';
+const ADMIN_APP_URL = process.env.ADMIN_APP_URL || 'http://localhost:5174';
 
 const BRAND = { ink: '#1a1512', saffron: '#FF6B00', saffronDark: '#C2410C', muted: '#6b6560', border: '#eee5db' };
 
@@ -95,4 +96,46 @@ async function sendVerificationEmail({ to, name, token }) {
   });
 }
 
-module.exports = { sendVerificationEmail };
+const SEVERITY_COLOR = { critical: '#dc2626', warning: '#d97706', info: '#0369a1' };
+
+function platformAlertEmailHtml({ alert, tenantName }) {
+  const color = SEVERITY_COLOR[alert.severity] || SEVERITY_COLOR.warning;
+  return `<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:0;background:#f6f1ea;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f1ea;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid ${BRAND.border};">
+            <tr><td style="background:${BRAND.ink};padding:24px 32px;">
+              <span style="font-size:18px;font-weight:800;color:#ffffff;">THAAALI Admin Panel</span>
+            </td></tr>
+            <tr><td style="padding:28px 32px;">
+              <span style="display:inline-block;padding:4px 10px;border-radius:100px;background:${color}1a;color:${color};font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:14px;">${escapeHtml(alert.severity)} · ${escapeHtml(alert.type)}</span>
+              <h1 style="margin:0 0 12px;font-size:17px;font-weight:800;color:${BRAND.ink};">${escapeHtml(alert.message)}</h1>
+              ${tenantName ? `<p style="margin:0 0 16px;font-size:13.5px;color:${BRAND.muted};">Tenant: ${escapeHtml(tenantName)}</p>` : ''}
+              <a href="${ADMIN_APP_URL}" style="display:inline-block;margin-top:8px;padding:11px 22px;font-size:13.5px;font-weight:700;color:#ffffff;background:${BRAND.saffron};text-decoration:none;border-radius:10px;">Open Admin Panel</a>
+            </td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+async function sendPlatformAlertEmail({ to, alert, tenantName }) {
+  if (!resend) {
+    console.warn(`[email] RESEND_API_KEY not set — skipping alert email to ${to}: [${alert.severity}] ${alert.message}`);
+    return;
+  }
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `[THAAALI Admin] ${alert.severity.toUpperCase()}: ${alert.message}`,
+    html: platformAlertEmailHtml({ alert, tenantName }),
+    text: `[${alert.severity}] ${alert.message}${tenantName ? ` (tenant: ${tenantName})` : ''}\n\n${ADMIN_APP_URL}`,
+  });
+}
+
+module.exports = { sendVerificationEmail, sendPlatformAlertEmail };

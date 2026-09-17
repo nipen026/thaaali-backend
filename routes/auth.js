@@ -6,6 +6,8 @@ const { auth, SECRET } = require('../middleware/auth');
 const { serializeUser } = require('../utils/serialize');
 const { generateVerificationToken, hashToken } = require('../utils/tokens');
 const { sendVerificationEmail } = require('../services/email');
+const { logEvent } = require('../utils/events');
+const { slugify, uniqueSlug } = require('../utils/tenantSlug');
 
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const VERIFICATION_RESEND_COOLDOWN_MS = 60 * 1000;
@@ -16,20 +18,6 @@ async function issueVerificationEmail(user) {
     data: { userId: user.id, tokenHash: hash, expiresAt: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS) },
   });
   await sendVerificationEmail({ to: user.email, name: user.name, token: raw });
-}
-
-function slugify(name) {
-  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'business';
-}
-
-async function uniqueSlug(base) {
-  let slug = base;
-  let n = 1;
-  while (await prisma.tenant.findUnique({ where: { slug } })) {
-    n += 1;
-    slug = `${base}-${n}`;
-  }
-  return slug;
 }
 
 function signToken(user) {
@@ -74,6 +62,8 @@ router.post('/register', async (req, res, next) => {
       console.error('Failed to send verification email:', err);
     }
 
+    logEvent({ tenantId: tenant.id, userId: user.id, name: 'signup_completed', metadata: { businessType: tenant.businessType } });
+
     const token = signToken(user);
     res.status(201).json({ token, user: serializeUser(user), tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name } });
   } catch (err) { next(err); }
@@ -86,6 +76,14 @@ router.post('/login', async (req, res, next) => {
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+    // Set by a platform/business admin deactivating one team member's account (see
+    // routes/platform.js) — distinct from a whole tenant being suspended (middleware/accountStatus.js).
+    if (user.status === 'inactive') {
+      return res.status(403).json({ error: 'This account has been deactivated. Contact your business owner for access.' });
+    }
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+    logEvent({ tenantId: user.tenantId, userId: user.id, name: 'login' });
+
     const token = signToken(user);
     res.json({ token, user: serializeUser(user) });
   } catch (err) { next(err); }

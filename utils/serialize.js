@@ -202,6 +202,27 @@ function serializeTenant(t) {
   };
 }
 
+function serializeIntegration(i) {
+  return {
+    id: i.id,
+    platform: i.platform,
+    enabled: i.enabled,
+    webhook_token: i.webhookToken,
+    webhook_secret: i.webhookSecret,
+    last_order_at: ts(i.lastOrderAt),
+  };
+}
+
+function serializeExternalMapping(m) {
+  return {
+    id: m.id,
+    external_item_id: m.externalItemId,
+    external_name: m.externalName,
+    menu_item_id: m.menuItemId,
+    menu_item_name: m.menuItem ? m.menuItem.name : null,
+  };
+}
+
 function serializeCustomer(c) {
   return {
     id: c.id,
@@ -213,9 +234,91 @@ function serializeCustomer(c) {
   };
 }
 
+function serializePlatformAdmin(a) {
+  return { id: a.id, name: a.name, email: a.email, role: a.role };
+}
+
+function serializePlatformTenant(t) {
+  return {
+    id: t.id,
+    name: t.name,
+    slug: t.slug,
+    business_type: t.businessType,
+    plan_tier: t.planTier,
+    plan_status: t.planStatus,
+    plan_renews_at: ts(t.planRenewsAt),
+    plan_seats: t.planSeats,
+    plan_amount: num(t.planAmount),
+    billing_customer_id: t.billingCustomerId,
+    created_at: ts(t.createdAt),
+    users_count: t._count ? t._count.users : undefined,
+    orders_count: t._count ? t._count.orders : undefined,
+  };
+}
+
+function serializeSubscriptionPayment(p) {
+  return {
+    id: p.id,
+    tenant_id: p.tenantId,
+    tenant_name: p.tenant ? p.tenant.name : undefined,
+    amount: num(p.amount),
+    currency: p.currency,
+    status: p.status,
+    period_start: ts(p.periodStart),
+    period_end: ts(p.periodEnd),
+    method: p.method,
+    notes: p.notes,
+    recorded_by: p.recordedBy,
+    created_at: ts(p.createdAt),
+  };
+}
+
+function serializeProductEvent(e) {
+  return {
+    id: e.id,
+    tenant_id: e.tenantId,
+    tenant_name: e.tenant ? e.tenant.name : undefined,
+    user_id: e.userId,
+    name: e.name,
+    metadata: e.metadata,
+    created_at: ts(e.createdAt),
+  };
+}
+
+function serializePlatformAlert(a) {
+  return {
+    id: a.id,
+    tenant_id: a.tenantId,
+    tenant_name: a.tenant ? a.tenant.name : null,
+    type: a.type,
+    severity: a.severity,
+    message: a.message,
+    metadata: a.metadata,
+    status: a.status,
+    resolved_by: a.resolvedBy,
+    resolved_at: ts(a.resolvedAt),
+    created_at: ts(a.createdAt),
+  };
+}
+
+function serializeSystemError(e) {
+  return {
+    id: e.id,
+    tenant_id: e.tenantId,
+    route: e.route,
+    method: e.method,
+    message: e.message,
+    stack: e.stack,
+    created_at: ts(e.createdAt),
+  };
+}
+
 module.exports = {
   num, ts, dateOnly, round2,
   serializeTable, serializeMenuCategory, serializeMenuItem, serializeOrder, serializeBill,
   serializeInventoryItem, serializeStaff, serializeHotelRoom, serializeReservation, serializeUser,
   serializeTenant, computeAttendanceHours, serializeAttendanceRecord, serializeCustomer,
+  serializeIntegration, serializeExternalMapping,
+  serializePlatformAdmin, serializePlatformTenant, serializeSubscriptionPayment,
+  serializeProductEvent, serializePlatformAlert, serializeSystemError,
 };
