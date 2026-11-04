@@ -1,17 +1,22 @@
 const router = require('express').Router();
 const { prisma } = require('../config/prisma');
 const { serializeBill, serializeTable } = require('../utils/serialize');
+const { priceBill, loadPricingContext, normalizeCouponCode, round2 } = require('../services/discounts');
+const { WalletError, findWalletByPhone, debitWallet } = require('../services/wallet');
 
 const GST_RATE = 0.05;
 const calculateGST = (subtotal) => {
-  const gst = subtotal * GST_RATE;
-  return { cgst: gst / 2, sgst: gst / 2, total_gst: gst };
+  const gst = round2(subtotal * GST_RATE);
+  const cgst = round2(gst / 2);
+  return { cgst, sgst: round2(gst - cgst), total_gst: gst };
 };
 
 const withBillRelations = { items: true, billOrders: true };
 
-async function nextBillNumber(tenantId) {
-  const counter = await prisma.counter.upsert({
+// `db` is the global client or a transaction client — the counter bump must commit or roll back
+// together with the bill that consumes the number.
+async function nextBillNumber(db, tenantId) {
+  const counter = await db.counter.upsert({
     where: { id: `bill:${tenantId}` },
     update: { seq: { increment: 1 } },
     create: { id: `bill:${tenantId}`, tenantId, seq: 1 },
@@ -41,46 +46,160 @@ async function incrementCustomerSpend(tenantId, phone, amount) {
   });
 }
 
+class BillingError extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; }
+}
+
+const sendBillingError = (err, res, next) => {
+  if (err instanceof BillingError || err instanceof WalletError) return res.status(err.status).json({ error: err.message });
+  return next(err);
+};
+
+async function loadOrdersForBilling(req) {
+  const { table_id, order_ids } = req.body;
+  const where = { tenantId: req.tenantId };
+  if (order_ids) where.id = { in: order_ids };
+  else { where.tableId = table_id; where.status = { not: 'billed' }; }
+  return prisma.order.findMany({ where, include: { items: true } });
+}
+
+// Prices a set of orders end to end: promotions -> coupon -> manual discount -> GST -> wallet.
+// Shared by /preview (what the cashier sees) and /generate (what actually gets billed) so the two
+// can never disagree. `db` lets generate() run it inside its transaction.
+async function priceOrders(db, req, orders) {
+  const { discount = 0, coupon_code, use_wallet, payment_method } = req.body;
+  // One dining party generally shares one customer — take the first order that captured one.
+  const withCustomer = orders.find((o) => o.customerPhone) || orders[0];
+  const customerPhone = withCustomer.customerPhone || null;
+  const couponCode = normalizeCouponCode(coupon_code);
+
+  const ctx = await loadPricingContext(db, { tenantId: req.tenantId, orders, couponCode, customerPhone });
+  const pricing = priceBill({ ...ctx, couponCode, customerPhone, manualDiscount: discount });
+  const gst = calculateGST(pricing.net);
+  const grandTotal = round2(pricing.net + gst.total_gst);
+
+  let walletInfo = null;
+  if (use_wallet || payment_method === 'wallet') {
+    const found = await findWalletByPhone(db, req.tenantId, customerPhone);
+    const balance = found ? Number(found.wallet.balance) : 0;
+    walletInfo = { wallet: found ? found.wallet : null, balance, applied: round2(Math.min(balance, grandTotal)) };
+  }
+  return { withCustomer, customerPhone, couponCode, ctx, pricing, gst, grandTotal, walletInfo };
+}
+
+router.post('/preview', async (req, res, next) => {
+  try {
+    const orders = await loadOrdersForBilling(req);
+    if (!orders.length) return res.status(404).json({ error: 'No orders found' });
+    const { pricing, gst, grandTotal, walletInfo, customerPhone } = await priceOrders(prisma, req, orders);
+    // Always report the balance when there's a phone, even if the cashier hasn't toggled the
+    // wallet on, so the UI can offer the toggle with the amount visible.
+    const found = walletInfo ? null : await findWalletByPhone(prisma, req.tenantId, customerPhone);
+    const balance = walletInfo ? walletInfo.balance : found ? Number(found.wallet.balance) : 0;
+    const applied = walletInfo ? walletInfo.applied : 0;
+    res.json({
+      gross: pricing.gross,
+      promotion_discount: pricing.promotion_discount,
+      coupon_discount: pricing.coupon_discount,
+      manual_discount: pricing.manual_discount,
+      discount: pricing.discount,
+      subtotal: pricing.net,
+      cgst: gst.cgst, sgst: gst.sgst, total_gst: gst.total_gst,
+      grand_total: grandTotal,
+      coupon: pricing.coupon,
+      coupon_error: pricing.coupon_error,
+      customer_phone: customerPhone,
+      wallet: { balance, applied, payable: round2(grandTotal - applied) },
+      items: pricing.lines.map((l) => ({
+        name: l.name, qty: l.qty, unit: l.unit, price: l.price, line_total: l.lineTotal,
+        promotion_name: l.promotionName, promotion_discount: l.promotionDiscount, discount_amount: l.discountAmount,
+      })),
+    });
+  } catch (err) { sendBillingError(err, res, next); }
+});
+
 router.post('/generate', async (req, res, next) => {
   try {
-    const { table_id, order_ids, discount = 0, payment_method } = req.body;
-    const where = { tenantId: req.tenantId };
-    if (order_ids) where.id = { in: order_ids };
-    else { where.tableId = table_id; where.status = { not: 'billed' }; }
-
-    const orders = await prisma.order.findMany({ where, include: { items: true } });
+    const { table_id, payment_method, use_wallet } = req.body;
+    const orders = await loadOrdersForBilling(req);
     if (!orders.length) return res.status(404).json({ error: 'No orders found' });
 
-    const subtotal = orders.reduce((s, o) => s + Number(o.total), 0) - discount;
-    const gst = calculateGST(subtotal);
-    const grandTotal = subtotal + gst.total_gst;
-    const billNumber = await nextBillNumber(req.tenantId);
-    // One dining party generally shares one customer — take the first order that captured one.
-    const withCustomer = orders.find((o) => o.customerPhone) || orders[0];
+    // Everything that must succeed or fail together — bill, coupon redemption, wallet debit,
+    // order status — runs in one transaction, so a failed wallet debit can't leave behind a
+    // redeemed coupon or a half-created bill. Pricing is computed inside it too, so the coupon
+    // usage count and wallet balance it reads are the ones it then writes against.
+    const { bill, customerPhone, grandTotal, settled } = await prisma.$transaction(async (tx) => {
+      const p = await priceOrders(tx, req, orders);
+      if (p.couponCode && p.pricing.coupon_error) throw new BillingError(p.pricing.coupon_error);
 
-    const bill = await prisma.bill.create({
-      data: {
-        tenantId: req.tenantId,
-        billNumber,
-        tableId: table_id || null,
-        subtotal, discount, cgst: gst.cgst, sgst: gst.sgst, totalGst: gst.total_gst, grandTotal,
-        paymentMethod: payment_method || null,
-        status: payment_method ? 'paid' : 'generated',
-        customerName: withCustomer.customerName || null,
-        customerPhone: withCustomer.customerPhone || null,
-        paidAt: payment_method ? new Date() : null,
-        billOrders: { create: orders.map((o) => ({ orderId: o.id })) },
-        items: {
-          create: orders.flatMap((o) => o.items.map((i) => ({
-            menuItemId: i.menuItemId, nameSnapshot: i.nameSnapshot, priceSnapshot: i.priceSnapshot, qty: i.qty, unit: i.unit,
-          }))),
+      const walletApplied = p.walletInfo ? p.walletInfo.applied : 0;
+      if (use_wallet && !p.customerPhone) throw new BillingError('Customer phone is required to pay from a wallet');
+      if (payment_method === 'wallet' && walletApplied < p.grandTotal) throw new WalletError('Insufficient wallet balance', 409);
+      const remainder = round2(p.grandTotal - walletApplied);
+      if (walletApplied > 0 && remainder > 0 && !payment_method) {
+        throw new BillingError(`Choose a payment method for the remaining ₹${remainder.toFixed(2)}`);
+      }
+      const isPaid = remainder === 0 && walletApplied > 0 ? true : !!payment_method;
+      // A bill left unpaid ("generated") must not touch the wallet yet.
+      const walletToCharge = isPaid ? walletApplied : 0;
+      const finalMethod = !isPaid ? null : walletToCharge > 0 && remainder === 0 ? 'wallet' : payment_method;
+
+      const billNumber = await nextBillNumber(tx, req.tenantId);
+      const { pricing, gst, grandTotal: total, withCustomer } = p;
+
+      const created = await tx.bill.create({
+        data: {
+          tenantId: req.tenantId,
+          billNumber,
+          tableId: table_id || null,
+          subtotal: pricing.net, discount: pricing.discount,
+          promotionDiscount: pricing.promotion_discount, couponDiscount: pricing.coupon_discount,
+          couponId: pricing.coupon ? pricing.coupon.id : null, couponCode: pricing.coupon ? pricing.coupon.code : null,
+          walletAmount: walletToCharge,
+          cgst: gst.cgst, sgst: gst.sgst, totalGst: gst.total_gst, grandTotal: total,
+          paymentMethod: finalMethod,
+          status: isPaid ? 'paid' : 'generated',
+          customerName: withCustomer.customerName || null,
+          customerPhone: withCustomer.customerPhone || null,
+          paidAt: isPaid ? new Date() : null,
+          billOrders: { create: orders.map((o) => ({ orderId: o.id })) },
+          items: {
+            create: pricing.lines.map((l) => ({
+              menuItemId: l.menuItemId, nameSnapshot: l.name, priceSnapshot: l.price, qty: l.qty, unit: l.unit,
+              discountAmount: l.discountAmount, promotionDiscount: l.promotionDiscount,
+              promotionId: l.promotionId, promotionName: l.promotionName,
+            })),
+          },
         },
-      },
-      include: withBillRelations,
-    });
+        include: withBillRelations,
+      });
 
-    if (payment_method) {
-      await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { status: 'billed' } });
+      if (pricing.coupon) {
+        const c = p.ctx.coupon;
+        const { count } = await tx.coupon.updateMany({
+          where: { id: c.id, ...(c.usageLimit != null ? { usedCount: { lt: c.usageLimit } } : {}) },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (count === 0) throw new BillingError('Coupon usage limit reached', 409);
+        await tx.couponRedemption.create({
+          data: { tenantId: req.tenantId, couponId: c.id, billId: created.id, customerPhone: p.customerPhone, amount: pricing.coupon_discount },
+        });
+      }
+
+      if (walletToCharge > 0) {
+        await debitWallet(tx, {
+          tenantId: req.tenantId, walletId: p.walletInfo.wallet.id, amount: walletToCharge,
+          reason: 'payment', billId: created.id, note: `Bill TH-${String(billNumber).padStart(6, '0')}`, createdBy: req.user.id,
+        });
+      }
+
+      if (isPaid) {
+        await tx.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { status: 'billed' } });
+      }
+      return { bill: created, customerPhone: p.customerPhone, grandTotal: total, settled: isPaid };
+    }, { timeout: 20000, maxWait: 10000 });
+
+    if (settled) {
       if (table_id) {
         const t = await prisma.restaurantTable.update({
           where: { id: table_id },
@@ -95,24 +214,49 @@ router.post('/generate', async (req, res, next) => {
     const out = serializeBill(bill);
     req.io.emit('bill_generated', out);
     res.status(201).json(out);
-  } catch (err) { next(err); }
+  } catch (err) { sendBillingError(err, res, next); }
 });
 
 router.put('/:id/pay', async (req, res, next) => {
   try {
-    const existing = await prisma.bill.findUnique({ where: { id: req.params.id }, include: { billOrders: true } });
+    const { payment_method, use_wallet } = req.body;
+    const existing = await prisma.bill.findFirst({ where: { id: req.params.id, tenantId: req.tenantId }, include: { billOrders: true } });
     if (!existing) return res.status(404).json({ error: 'Not found' });
+    if (existing.status !== 'generated') return res.status(409).json({ error: `Bill is already ${existing.status}` });
 
-    const bill = await prisma.bill.update({
-      where: { id: req.params.id },
-      data: { status: 'paid', paymentMethod: req.body.payment_method, paidAt: new Date() },
-      include: withBillRelations,
-    });
+    const grandTotal = Number(existing.grandTotal);
+    const bill = await prisma.$transaction(async (tx) => {
+      let walletToCharge = 0;
+      let wallet = null;
+      if (use_wallet || payment_method === 'wallet') {
+        const found = await findWalletByPhone(tx, req.tenantId, existing.customerPhone);
+        if (!found) throw new BillingError('No wallet found for this bill\'s customer');
+        wallet = found.wallet;
+        walletToCharge = round2(Math.min(Number(wallet.balance), grandTotal));
+        if (payment_method === 'wallet' && walletToCharge < grandTotal) throw new WalletError('Insufficient wallet balance', 409);
+        if (walletToCharge < grandTotal && !payment_method) {
+          throw new BillingError(`Choose a payment method for the remaining ₹${(grandTotal - walletToCharge).toFixed(2)}`);
+        }
+      }
+      const finalMethod = walletToCharge >= grandTotal ? 'wallet' : payment_method;
 
-    await prisma.order.updateMany({
-      where: { id: { in: existing.billOrders.map((bo) => bo.orderId) } },
-      data: { status: 'billed' },
-    });
+      const updated = await tx.bill.update({
+        where: { id: existing.id },
+        data: { status: 'paid', paymentMethod: finalMethod, walletAmount: walletToCharge, paidAt: new Date() },
+        include: withBillRelations,
+      });
+      if (walletToCharge > 0) {
+        await debitWallet(tx, {
+          tenantId: req.tenantId, walletId: wallet.id, amount: walletToCharge, reason: 'payment', billId: existing.id,
+          note: `Bill TH-${String(existing.billNumber).padStart(6, '0')}`, createdBy: req.user.id,
+        });
+      }
+      await tx.order.updateMany({
+        where: { id: { in: existing.billOrders.map((bo) => bo.orderId) } },
+        data: { status: 'billed' },
+      });
+      return updated;
+    }, { timeout: 20000, maxWait: 10000 });
 
     if (existing.tableId) {
       const t = await prisma.restaurantTable.update({
@@ -127,7 +271,7 @@ router.put('/:id/pay', async (req, res, next) => {
     const out = serializeBill(bill);
     req.io.emit('bill_paid', out);
     res.json(out);
-  } catch (err) { next(err); }
+  } catch (err) { sendBillingError(err, res, next); }
 });
 
 router.get('/', async (req, res, next) => {

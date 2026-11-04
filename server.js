@@ -24,6 +24,9 @@ const hotelRoutes = require('./routes/hotel');
 const aiRoutes = require('./routes/ai');
 const tenantRoutes = require('./routes/tenant');
 const integrationRoutes = require('./routes/integrations');
+const promotionRoutes = require('./routes/promotions');
+const couponRoutes = require('./routes/coupons');
+const walletRoutes = require('./routes/wallet');
 const webhookRoutes = require('./routes/webhooks');
 const eventRoutes = require('./routes/events');
 const platformRoutes = require('./routes/platform');
@@ -83,6 +86,9 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/hotel', hotelRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/integrations', integrationRoutes);
+app.use('/api/promotions', promotionRoutes);
+app.use('/api/coupons', couponRoutes);
+app.use('/api/wallet', walletRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

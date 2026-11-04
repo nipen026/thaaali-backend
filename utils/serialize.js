@@ -76,6 +76,11 @@ function serializeBill(b) {
     orders: (b.billOrders || []).map((bo) => bo.orderId),
     subtotal: num(b.subtotal),
     discount: num(b.discount),
+    promotion_discount: num(b.promotionDiscount),
+    coupon_discount: num(b.couponDiscount),
+    manual_discount: round2(num(b.discount) - num(b.promotionDiscount) - num(b.couponDiscount)),
+    coupon_code: b.couponCode,
+    wallet_amount: num(b.walletAmount),
     cgst: num(b.cgst),
     sgst: num(b.sgst),
     total_gst: num(b.totalGst),
@@ -92,6 +97,8 @@ function serializeBill(b) {
       price: num(i.priceSnapshot),
       qty: i.qty,
       unit: i.unit,
+      discount_amount: num(i.discountAmount),
+      promotion_name: i.promotionName,
     })),
   };
 }
@@ -234,6 +241,70 @@ function serializeCustomer(c) {
   };
 }
 
+function serializePromotion(p) {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    type: p.type,
+    value: num(p.value),
+    scope: p.scope,
+    category_ids: p.categoryIds,
+    menu_item_ids: p.menuItemIds,
+    days_of_week: p.daysOfWeek,
+    start_time: p.startTime,
+    end_time: p.endTime,
+    starts_at: ts(p.startsAt),
+    ends_at: ts(p.endsAt),
+    active: p.active,
+    created_at: ts(p.createdAt),
+  };
+}
+
+function serializeCoupon(c) {
+  return {
+    id: c.id,
+    code: c.code,
+    description: c.description,
+    type: c.type,
+    value: num(c.value),
+    max_discount: num(c.maxDiscount),
+    min_order_value: num(c.minOrderValue),
+    starts_at: ts(c.startsAt),
+    expires_at: ts(c.expiresAt),
+    usage_limit: c.usageLimit,
+    per_customer_limit: c.perCustomerLimit,
+    used_count: c.usedCount,
+    active: c.active,
+    created_at: ts(c.createdAt),
+  };
+}
+
+function serializeWallet(w) {
+  return {
+    id: w.id,
+    customer_id: w.customerId,
+    customer_name: w.customer ? w.customer.name : undefined,
+    phone: w.customer ? w.customer.phone : undefined,
+    balance: num(w.balance),
+    updated_at: ts(w.updatedAt),
+  };
+}
+
+function serializeWalletTxn(t) {
+  return {
+    id: t.id,
+    type: t.type,
+    amount: num(t.amount),
+    balance_after: num(t.balanceAfter),
+    reason: t.reason,
+    method: t.method,
+    bill_id: t.billId,
+    note: t.note,
+    created_at: ts(t.createdAt),
+  };
+}
+
 function serializePlatformAdmin(a) {
   return { id: a.id, name: a.name, email: a.email, role: a.role };
 }
@@ -319,6 +390,7 @@ module.exports = {
   serializeInventoryItem, serializeStaff, serializeHotelRoom, serializeReservation, serializeUser,
   serializeTenant, computeAttendanceHours, serializeAttendanceRecord, serializeCustomer,
   serializeIntegration, serializeExternalMapping,
+  serializePromotion, serializeCoupon, serializeWallet, serializeWalletTxn,
   serializePlatformAdmin, serializePlatformTenant, serializeSubscriptionPayment,
   serializeProductEvent, serializePlatformAlert, serializeSystemError,
 };
